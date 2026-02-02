@@ -18,9 +18,7 @@ AXIOM is a high-performance, multi-threaded network scanner designed for securit
 
 ## 📸 Screenshots
 
-<img width="680" height="269" alt="image" src="https://github.com/user-attachments/assets/0748a650-72b5-44fa-bf8f-6d50bbf05aeb" />
-
-
+<img width="680" height="269" alt="AXIOM Interface" src="https://github.com/user-attachments/assets/0748a650-72b5-44fa-bf8f-6d50bbf05aeb" />
 
 ## 🛠️ Installation & Usage
 
