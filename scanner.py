@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AXIOM SECURITY SCANNER v1.2
+AXIOM SECURITY SCANNER v2.0
 Author: Plansmight (Kadir Veysel Sayar)
 Description: Mathematical Precision Security Scanner with Enhanced UI.
 
@@ -10,16 +10,22 @@ Use only against systems you own or are explicitly authorized to test.
 import argparse
 import os
 import socket
+import ssl
 import sys
 import threading
 from datetime import datetime
 from queue import Queue
 
-VERSION = "1.2"
+VERSION = "2.0"
 DEFAULT_TARGET = "scanme.nmap.org"
 DEFAULT_PORTS = "1-1000"
 DEFAULT_THREADS = 100
 DEFAULT_TIMEOUT = 0.5
+
+# Ports that get an active HTTP(S) probe instead of a passive banner read.
+HTTP_PORTS = {80, 8000, 8008, 8080, 8081, 8888}
+HTTPS_PORTS = {443, 8443}
+BANNER_WIDTH = 90
 
 # Enable ANSI escape sequences on Windows terminals (no-op elsewhere).
 if os.name == "nt":
@@ -127,6 +133,11 @@ def parse_args():
         default=DEFAULT_TIMEOUT,
         help=f"connection timeout in seconds (default: {DEFAULT_TIMEOUT})",
     )
+    parser.add_argument(
+        "--no-probe",
+        action="store_true",
+        help="passive mode: never send HTTP requests, only read banners services announce",
+    )
     return parser.parse_args()
 
 
@@ -170,6 +181,13 @@ def service_name(port):
         return "unknown"
 
 
+def sanitize(text, limit=BANNER_WIDTH):
+    """Banners come from the remote host, so never print them raw: control
+    characters (e.g. ANSI escape sequences) could manipulate the terminal."""
+    clean = "".join(ch if ch.isprintable() else "." for ch in text)
+    return clean[:limit]
+
+
 def grab_banner(sock):
     """Read what the service announces on connect (SSH, FTP, SMTP, ...).
     Services that wait for the client to speak first (e.g. HTTP) return nothing."""
@@ -178,32 +196,99 @@ def grab_banner(sock):
         data = sock.recv(1024)
     except OSError:  # includes socket.timeout
         return "No banner"
-    text = data.decode("utf-8", errors="replace").strip()
-    if not text:
+    lines = data.decode("utf-8", errors="replace").strip().splitlines()
+    if not lines:
         return "No banner"
-    return text.splitlines()[0][:60]
+    return sanitize(lines[0])
+
+
+def http_probe(sock, host, use_tls, timeout=2.0):
+    """Send a minimal HEAD request and report what the server says about itself.
+    The Server header is the server's own claim and may be hidden or spoofed."""
+    conn = sock
+    tls_version = None
+    try:
+        sock.settimeout(timeout)
+        if use_tls:
+            # Certificate verification is intentionally off: the scanner only reads
+            # response headers and has to work against self-signed hosts too.
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            conn = context.wrap_socket(sock, server_hostname=host)
+            tls_version = conn.version()
+
+        request = (
+            f"HEAD / HTTP/1.0\r\nHost: {sanitize(host, 255)}\r\n"
+            f"User-Agent: AXIOM/{VERSION}\r\nConnection: close\r\n\r\n"
+        )
+        conn.sendall(request.encode("ascii", errors="replace"))
+
+        response = b""
+        while b"\n\n" not in response and b"\r\n\r\n" not in response and len(response) < 4096:
+            chunk = conn.recv(1024)
+            if not chunk:
+                break
+            response += chunk
+    except ssl.SSLError:  # must come before OSError (it is a subclass)
+        return "TLS handshake failed"
+    except OSError:  # includes socket.timeout
+        return "No response"
+    finally:
+        if conn is not sock:
+            conn.close()
+
+    lines = response.decode("iso-8859-1").splitlines()
+    status = lines[0].strip() if lines else ""
+    if not status:
+        return "No response"
+    if not status.startswith("HTTP/"):
+        return sanitize(f"Non-HTTP reply: {status}")
+
+    server = "not disclosed"
+    for line in lines[1:]:
+        if not line.strip():
+            break  # end of headers
+        name, _, value = line.partition(":")
+        if name.strip().lower() == "server" and value.strip():
+            server = value.strip()
+            break
+
+    parts = [status, f"Server: {server}"]
+    if tls_version:
+        parts.insert(0, tls_version)
+    return sanitize(" | ".join(parts))
 
 
 class Scanner:
-    def __init__(self, target, ip, ports, threads, timeout):
+    def __init__(self, target, ip, ports, threads, timeout, probe=True):
         self.target = target
         self.ip = ip
         self.ports = ports
         self.total = len(ports)
         self.threads = min(threads, self.total)
         self.timeout = timeout
+        self.probe = probe
         self.queue = Queue()
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.scanned = 0
         self.results = []  # (port, service, banner)
 
+    def identify(self, sock, port):
+        if self.probe:
+            if port in HTTPS_PORTS:
+                return http_probe(sock, self.target, use_tls=True)
+            if port in HTTP_PORTS:
+                return http_probe(sock, self.target, use_tls=False)
+        return grab_banner(sock)
+
     def scan_port(self, port):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(self.timeout)
                 if sock.connect_ex((self.ip, port)) == 0:
-                    banner = grab_banner(sock)
+                    banner = self.identify(sock, port)
                     service = service_name(port)
                     with self.lock:
                         self.results.append((port, service, banner))
@@ -262,8 +347,10 @@ class Scanner:
         monitor.join()
 
 
-def print_header(start_time):
+def print_header(start_time, probe):
+    mode = "active (HTTP/HTTPS probe)" if probe else "passive (banner read only)"
     print(f"\n{Colors.GREY}Computation Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
+    print(f"{Colors.GREY}Mode: {mode}{Colors.RESET}")
     print("-" * 65)
     print(f"{Colors.BOLD} PORT   | STATUS | SERVICE      | BANNER{Colors.RESET}")
     print("-" * 65)
@@ -277,6 +364,7 @@ def print_summary(results, duration):
         print(f"{Colors.BOLD}Open ports (sorted):{Colors.RESET}")
         for port, service, banner in sorted(results):
             print(f"  {Colors.GREEN}{port:<6}{Colors.RESET} {service:<12} {banner}")
+        print(f"{Colors.GREY}Banners and Server headers are reported by the remote host, not verified.{Colors.RESET}")
     print(f"Total Open Ports : {Colors.GREEN}{len(results)}{Colors.RESET}")
     print(f"Time Elapsed     : {duration}")
     print("-" * 65 + "\n")
@@ -289,10 +377,11 @@ def main():
     target = args.target or prompt_target()
     ip = resolve_target(target)
 
-    scanner = Scanner(target, ip, args.ports, args.threads, args.timeout)
+    probe = not args.no_probe
+    scanner = Scanner(target, ip, args.ports, args.threads, args.timeout, probe)
 
     start_time = datetime.now()
-    print_header(start_time)
+    print_header(start_time, probe)
 
     try:
         scanner.run()
