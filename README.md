@@ -2,7 +2,7 @@
 
 > **Mathematical Precision Network Analysis Tool**
 
-AXIOM is a high-performance, multi-threaded network scanner designed for security professionals and system administrators. It features a custom "Kali Linux" style interface, advanced banner grabbing, and visual reporting metrics.
+AXIOM is a multi-threaded TCP port scanner written in Python, designed for learning, security professionals and system administrators. It features a custom "Kali Linux" style interface, banner grabbing, and visual progress reporting.
 
 ![Python](https://img.shields.io/badge/Python-3.x-blue?style=for-the-badge&logo=python)
 ![Status](https://img.shields.io/badge/Status-Stable-green?style=for-the-badge)
@@ -10,11 +10,13 @@ AXIOM is a high-performance, multi-threaded network scanner designed for securit
 
 ## 🚀 Features
 
-* **Multi-Threaded Architecture:** Scans 1000+ ports in seconds using concurrent threads.
-* **Smart Banner Grabbing:** Automatically detects running services (Apache, Nginx, etc.).
-* **Precision UI:** Mathematical precision branding with visual progress bars and color-coded outputs.
-* **Detailed Reporting:** Provides a summary table of open ports and scan duration.
-* **Interactive Mode:** User-friendly input prompts for target selection.
+* **Multi-Threaded Architecture:** Scans ports concurrently with a configurable thread count.
+* **Flexible Port Selection:** Scan a range (`1-1000`), a list (`22,80,443`), or a mix (`1-100,443`).
+* **Banner Grabbing:** Reads the banner of services that announce themselves on connect (SSH, FTP, SMTP, ...).
+* **Service Names:** Maps open ports to their standard service name (a hint based on the port number, not a detection).
+* **Precision UI:** Visual progress bar and color-coded output.
+* **Sorted Report:** Open ports listed in port order with scan duration.
+* **Interactive or CLI Mode:** Pass the target as an argument, or run without one for the interactive prompt.
 
 ## 📸 Screenshots
 
@@ -22,21 +24,37 @@ AXIOM is a high-performance, multi-threaded network scanner designed for securit
 
 ## 🛠️ Installation & Usage
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/Kadirveysel/AXIOM-Security-Scanner.git
-   
-2. **Enter the directory:**
-   ```bash
-   cd AXIOM-Security-Scanner
- 
-3. **Run the tool:**
-   ```bash
-   python scanner.py
+```bash
+git clone https://github.com/Kadirveysel/AXIOM-Security-Scanner.git
+cd AXIOM-Security-Scanner
+python scanner.py
+```
 
-4. **Enter Target:** Simply type the target IP or Domain (e.g., google.com) or press ENTER to scan the default test server.
+Run without arguments for the interactive prompt (press ENTER to scan the default test server), or use the command line:
 
-⚠️ Disclaimer
+```bash
+python scanner.py scanme.nmap.org                  # default ports 1-1000
+python scanner.py 192.168.1.10 -p 1-65535          # full port range
+python scanner.py example.local -p 22,80,443       # specific ports
+python scanner.py 10.0.0.5 -t 200 --timeout 1.0    # 200 threads, 1s timeout
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `target` | IP or hostname | interactive prompt |
+| `-p`, `--ports` | Port range or list | `1-1000` |
+| `-t`, `--threads` | Worker threads | `100` |
+| `--timeout` | Connection timeout (seconds) | `0.5` |
+
+## 🗺️ Roadmap
+
+- [ ] HTTP/HTTPS probing for real web server and version detection
+- [ ] JSON / CSV report export
+- [ ] Vulnerability hints for detected service versions
+- [ ] Unit tests and CI
+
+## ⚠️ Disclaimer
+
 This tool is created for educational purposes and authorized security testing only. The author (Plansmight) is not responsible for any misuse or damage caused by this program. Always obtain permission before scanning a network.
 
 Authored by Plansmight

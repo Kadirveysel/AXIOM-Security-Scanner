@@ -1,30 +1,44 @@
-import socket
-import threading
-from queue import Queue
-from datetime import datetime
-import sys
-import time
-import os
+#!/usr/bin/env python3
+"""
+AXIOM SECURITY SCANNER v1.2
+Author: Plansmight (Kadir Veysel Sayar)
+Description: Mathematical Precision Security Scanner with Enhanced UI.
 
-# AXIOM SECURITY SCANNER v1.1
-# Author: Plansmight (Kadir Veysel Sayar)
-# Description: Mathematical Precision Security Scanner with Enhanced UI.
+Use only against systems you own or are explicitly authorized to test.
+"""
+
+import argparse
+import os
+import socket
+import sys
+import threading
+from datetime import datetime
+from queue import Queue
+
+VERSION = "1.2"
+DEFAULT_TARGET = "scanme.nmap.org"
+DEFAULT_PORTS = "1-1000"
+DEFAULT_THREADS = 100
+DEFAULT_TIMEOUT = 0.5
+
+# Enable ANSI escape sequences on Windows terminals (no-op elsewhere).
+if os.name == "nt":
+    os.system("")
+
 
 # --- RENK KODLARI (ANSI) ---
-os.system('color') 
-
 class Colors:
-    GREEN = '\033[92m'
-    GREY = '\033[90m'
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-    RED = '\033[91m'
-    CYAN = '\033[96m'
-    YELLOW = '\033[93m'
-    MAGENTA = '\033[95m'
-    BLUE = '\033[94m'
+    GREEN = "\033[92m"
+    GREY = "\033[90m"
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    RED = "\033[91m"
+    CYAN = "\033[96m"
+    YELLOW = "\033[93m"
+    MAGENTA = "\033[95m"
+    BLUE = "\033[94m"
 
-# --- CONFIGURATION & BANNER ---
+
 def print_banner():
     banner = f"""{Colors.CYAN}
      █████╗ ██╗  ██╗██╗ ██████╗ ███╗   ███╗
@@ -32,143 +46,263 @@ def print_banner():
     ███████║ ╚███╔╝ ██║██║   ██║██╔████╔██║
     ██╔══██║ ██╔██╗ ██║██║   ██║██║╚██╔╝██║
     ██║  ██║██╔╝ ██╗██║╚██████╔╝██║ ╚═╝ ██║
-    ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝ ╚═╝     ╚═╝ v1.0
+    ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝ ╚═╝     ╚═╝ v{VERSION}
     {Colors.RESET}{Colors.GREY}Mathematical Precision Security Scanner{Colors.RESET}
     {Colors.GREY}Authored by: Plansmight{Colors.RESET}
     """
     print(banner)
 
-print_banner()
 
-# --- GELISTIRILMIS GIRIS EKRANI (INPUT UI) ---
-try:
-    # Kali Linux Tarzi Giris Ekrani
-    print(f"{Colors.CYAN}┌──( {Colors.BOLD}SET TARGET{Colors.RESET}{Colors.CYAN} )─[ {Colors.GREY}Press Enter for 'scanme.nmap.org'{Colors.RESET}{Colors.CYAN} ]")
-    user_input = input(f"└─► {Colors.RESET}")
-except KeyboardInterrupt:
-    sys.exit()
-
-if len(user_input) == 0:
-    TARGET = "scanme.nmap.org"
-    # Varsayilan secildigini belirtmek icin
-    print(f"{Colors.YELLOW}    └──> Default target selected.{Colors.RESET}")
-else:
-    TARGET = user_input
-
-# Hedefin IP'sini coz ve onayla
-try:
-    target_ip = socket.gethostbyname(TARGET)
-    print(f"{Colors.GREEN}    └──> Target Locked: {Colors.BOLD}{TARGET}{Colors.RESET} ({target_ip})")
-except socket.gaierror:
-    print(f"\n{Colors.RED}[!] Error: Hostname could not be resolved.{Colors.RESET}")
-    sys.exit()
-
-# --- TARAMA AYARLARI ---
-PORT_RANGE = 1000  
-THREAD_COUNT = 100 
-# -----------------------
-
-print_lock = threading.Lock()
-q = Queue()
-scanned_count = 0 
-open_ports = 0 
-is_scanning = True
-start_time = datetime.now()
-
-def get_banner(s):
+# --- ARGUMAN ISLEME ---
+def parse_ports(spec):
+    """Turn '1-1000', '22,80,443' or '1-100,443' into a sorted list of ports."""
+    ports = set()
     try:
-        return s.recv(1024).decode().strip()
-    except:
-        return "Unknown Service"
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start, end = (int(x) for x in part.split("-", 1))
+                if start > end:
+                    raise ValueError
+                ports.update(range(start, end + 1))
+            else:
+                ports.add(int(part))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid port specification '{spec}' (examples: 1-1000, 22,80,443)"
+        )
+    if not ports or min(ports) < 1 or max(ports) > 65535:
+        raise argparse.ArgumentTypeError("ports must be between 1 and 65535")
+    return sorted(ports)
 
-def ui_monitor():
-    global scanned_count
-    bar_length = 30
-    
-    while is_scanning:
-        with print_lock:
-            percent = (scanned_count / PORT_RANGE) * 100
-            if percent > 100: percent = 100
-            
-            filled_length = int(bar_length * scanned_count // PORT_RANGE)
-            bar = (Colors.CYAN + '█' * filled_length + 
-                   Colors.GREY + '-' * (bar_length - filled_length) + 
-                   Colors.RESET)
-            
-            sys.stdout.write(f"\r{Colors.YELLOW}[*] Calculating:{Colors.RESET} |{bar}| {scanned_count}/{PORT_RANGE} ({percent:.0f}%)")
-            sys.stdout.flush()
-        
-        if scanned_count >= PORT_RANGE:
-            break
-        time.sleep(0.1)
 
-def port_scan(port):
-    global scanned_count, open_ports
+def positive_int(value):
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.5) 
-        result = s.connect_ex((TARGET, port))
-        
-        if result == 0:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{value}' is not a number")
+    if number < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return number
+
+
+def positive_float(value):
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{value}' is not a number")
+    if number <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+    return number
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="AXIOM - Mathematical Precision Security Scanner",
+        epilog="Authorized testing only. Always get permission before scanning.",
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        help="IP or hostname (omit to use the interactive prompt)",
+    )
+    parser.add_argument(
+        "-p", "--ports",
+        type=parse_ports,
+        default=parse_ports(DEFAULT_PORTS),
+        metavar="SPEC",
+        help=f"ports to scan, e.g. 1-1000 or 22,80,443 (default: {DEFAULT_PORTS})",
+    )
+    parser.add_argument(
+        "-t", "--threads",
+        type=positive_int,
+        default=DEFAULT_THREADS,
+        help=f"number of worker threads (default: {DEFAULT_THREADS})",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=positive_float,
+        default=DEFAULT_TIMEOUT,
+        help=f"connection timeout in seconds (default: {DEFAULT_TIMEOUT})",
+    )
+    return parser.parse_args()
+
+
+# --- GIRIS EKRANI (INPUT UI) ---
+def prompt_target():
+    """Kali Linux style interactive prompt. Enter selects the default target."""
+    try:
+        print(
+            f"{Colors.CYAN}┌──( {Colors.BOLD}SET TARGET{Colors.RESET}{Colors.CYAN} )"
+            f"─[ {Colors.GREY}Press Enter for '{DEFAULT_TARGET}'{Colors.RESET}{Colors.CYAN} ]"
+        )
+        user_input = input(f"└─► {Colors.RESET}").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        sys.exit(130)
+
+    if not user_input:
+        print(f"{Colors.YELLOW}    └──> Default target selected.{Colors.RESET}")
+        return DEFAULT_TARGET
+    return user_input
+
+
+def resolve_target(target):
+    try:
+        ip = socket.gethostbyname(target)
+    except socket.gaierror:
+        print(f"\n{Colors.RED}[!] Error: Hostname could not be resolved.{Colors.RESET}")
+        sys.exit(1)
+    print(
+        f"{Colors.GREEN}    └──> Target Locked: {Colors.BOLD}{target}{Colors.RESET}"
+        f"{Colors.GREEN} ({ip}){Colors.RESET}"
+    )
+    return ip
+
+
+# --- TARAMA ---
+def service_name(port):
+    try:
+        return socket.getservbyport(port, "tcp")
+    except OSError:
+        return "unknown"
+
+
+def grab_banner(sock):
+    """Read what the service announces on connect (SSH, FTP, SMTP, ...).
+    Services that wait for the client to speak first (e.g. HTTP) return nothing."""
+    try:
+        sock.settimeout(1.0)
+        data = sock.recv(1024)
+    except OSError:  # includes socket.timeout
+        return "No banner"
+    text = data.decode("utf-8", errors="replace").strip()
+    if not text:
+        return "No banner"
+    return text.splitlines()[0][:60]
+
+
+class Scanner:
+    def __init__(self, target, ip, ports, threads, timeout):
+        self.target = target
+        self.ip = ip
+        self.ports = ports
+        self.total = len(ports)
+        self.threads = min(threads, self.total)
+        self.timeout = timeout
+        self.queue = Queue()
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.scanned = 0
+        self.results = []  # (port, service, banner)
+
+    def scan_port(self, port):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(self.timeout)
+                if sock.connect_ex((self.ip, port)) == 0:
+                    banner = grab_banner(sock)
+                    service = service_name(port)
+                    with self.lock:
+                        self.results.append((port, service, banner))
+                        sys.stdout.write("\r" + " " * 80 + "\r")
+                        print(
+                            f"{Colors.GREEN} [+] {port:<6} | {Colors.BOLD}OPEN"
+                            f"{Colors.RESET}{Colors.GREEN} | {service:<12} | {banner}{Colors.RESET}"
+                        )
+        except OSError:
+            pass  # unreachable / reset: treat as closed
+        finally:
+            with self.lock:
+                self.scanned += 1
+
+    def worker(self):
+        while True:
+            port = self.queue.get()
             try:
-                banner = get_banner(s)
-            except:
-                banner = "N/A"
-            
-            with print_lock:
-                open_ports += 1
-                sys.stdout.write(f"\r" + " "*80 + "\r") 
-                print(f"{Colors.GREEN} [+] {str(port):<8} | {Colors.BOLD}OPEN{Colors.RESET}{Colors.GREEN} | {banner}{Colors.RESET}")
-        
-        s.close()
-    except:
-        pass
-    finally:
-        scanned_count += 1
+                self.scan_port(port)
+            finally:
+                self.queue.task_done()
 
-def threader():
-    while True:
-        worker = q.get()
-        port_scan(worker)
-        q.task_done()
+    def ui_monitor(self):
+        bar_length = 30
+        while not self.done.is_set():
+            with self.lock:
+                scanned = self.scanned
+                percent = min(scanned / self.total * 100, 100)
+                filled = min(bar_length * scanned // self.total, bar_length)
+                bar = (
+                    Colors.CYAN + "█" * filled
+                    + Colors.GREY + "-" * (bar_length - filled)
+                    + Colors.RESET
+                )
+                sys.stdout.write(
+                    f"\r{Colors.YELLOW}[*] Calculating:{Colors.RESET} |{bar}| "
+                    f"{scanned}/{self.total} ({percent:.0f}%)"
+                )
+                sys.stdout.flush()
+            if scanned >= self.total:
+                break
+            self.done.wait(0.1)
 
-# --- ANA PROGRAM ---
-if __name__ == "__main__":
-    
-    # Baslangic cizgisi
+    def run(self):
+        for _ in range(self.threads):
+            threading.Thread(target=self.worker, daemon=True).start()
+
+        monitor = threading.Thread(target=self.ui_monitor, daemon=True)
+        monitor.start()
+
+        for port in self.ports:
+            self.queue.put(port)
+
+        self.queue.join()
+        self.done.set()
+        monitor.join()
+
+
+def print_header(start_time):
     print(f"\n{Colors.GREY}Computation Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
     print("-" * 65)
-    print(f"{Colors.BOLD} PORT     | STATUS | SERVICE BANNER{Colors.RESET}")
+    print(f"{Colors.BOLD} PORT   | STATUS | SERVICE      | BANNER{Colors.RESET}")
     print("-" * 65)
 
-    for x in range(THREAD_COUNT):
-        t = threading.Thread(target=threader)
-        t.daemon = True
-        t.start()
 
-    monitor_thread = threading.Thread(target=ui_monitor)
-    monitor_thread.daemon = True
-    monitor_thread.start()
-
-    for worker in range(1, PORT_RANGE + 1):
-        q.put(worker)
-
-    try:
-        q.join()
-        is_scanning = False 
-        monitor_thread.join() 
-    except KeyboardInterrupt:
-        is_scanning = False
-        print(f"\n\n{Colors.RED}[!] Process Interrupted.{Colors.RESET}")
-        sys.exit()
-
-    # --- OZET RAPORU ---
-    end_time = datetime.now()
-    duration = end_time - start_time
-    
-    sys.stdout.write(f"\r" + " "*80 + "\r")
+def print_summary(results, duration):
+    sys.stdout.write("\r" + " " * 80 + "\r")
     print("-" * 65)
     print(f"{Colors.CYAN}AXIOM ANALYSIS COMPLETE{Colors.RESET}")
-    print(f"Total Open Ports : {Colors.GREEN}{open_ports}{Colors.RESET}")
+    if results:
+        print(f"{Colors.BOLD}Open ports (sorted):{Colors.RESET}")
+        for port, service, banner in sorted(results):
+            print(f"  {Colors.GREEN}{port:<6}{Colors.RESET} {service:<12} {banner}")
+    print(f"Total Open Ports : {Colors.GREEN}{len(results)}{Colors.RESET}")
     print(f"Time Elapsed     : {duration}")
     print("-" * 65 + "\n")
+
+
+def main():
+    args = parse_args()
+    print_banner()
+
+    target = args.target or prompt_target()
+    ip = resolve_target(target)
+
+    scanner = Scanner(target, ip, args.ports, args.threads, args.timeout)
+
+    start_time = datetime.now()
+    print_header(start_time)
+
+    try:
+        scanner.run()
+    except KeyboardInterrupt:
+        scanner.done.set()
+        print(f"\n\n{Colors.RED}[!] Process Interrupted.{Colors.RESET}")
+        sys.exit(130)
+
+    print_summary(scanner.results, datetime.now() - start_time)
+
+
+if __name__ == "__main__":
+    main()
