@@ -25,7 +25,7 @@ AXIOM is a multi-threaded TCP port scanner written in Python, designed for learn
 
 ## 📸 Screenshots
 
-<img width="680" alt="AXIOM Interface" src="https://github.com/user-attachments/assets/0748a650-72b5-44fa-bf8f-6d50bbf05aeb" />
+<img width="680" alt="AXIOM v2.1 scanning a local web server: HTTP probe result and open / closed / filtered port states" src="assets/axiom-v2.1.png" />
 
 ## 🛠️ Installation & Usage
 
