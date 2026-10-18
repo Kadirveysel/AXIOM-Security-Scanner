@@ -23,6 +23,9 @@ DEFAULT_TARGET = "scanme.nmap.org"
 DEFAULT_PORTS = "1-1000"
 DEFAULT_THREADS = 100
 DEFAULT_TIMEOUT = 0.5
+# Windows reports a refused connection only after its own SYN retries, measured at
+# about 2 seconds even on loopback. A shorter timeout would call closed ports "filtered".
+WINDOWS_MIN_TIMEOUT = 3.0
 DEFAULT_RETRIES = 1
 
 # Ports that get an active HTTP(S) probe instead of a passive banner read.
@@ -143,8 +146,11 @@ def parse_args():
     parser.add_argument(
         "--timeout",
         type=positive_float,
-        default=DEFAULT_TIMEOUT,
-        help=f"connection timeout in seconds (default: {DEFAULT_TIMEOUT})",
+        default=None,
+        help=(
+            f"connection timeout in seconds (default: {DEFAULT_TIMEOUT}, "
+            f"{WINDOWS_MIN_TIMEOUT:g} on Windows)"
+        ),
     )
     parser.add_argument(
         "--retries",
@@ -446,10 +452,23 @@ def save_json(report, path):
         handle.write("\n")
 
 
-def print_header(start_time, probe):
+def resolve_timeout(requested, is_windows):
+    """Pick the connect timeout. Returns (timeout, warning_or_None).
+    An explicit --timeout is always honoured; on Windows a low value only earns a warning."""
+    if requested is None:
+        return (WINDOWS_MIN_TIMEOUT if is_windows else DEFAULT_TIMEOUT), None
+    if is_windows and requested < WINDOWS_MIN_TIMEOUT:
+        return requested, (
+            f"On Windows a closed port can take about 2 seconds to answer, so with "
+            f"--timeout {requested:g} closed ports may be reported as filtered."
+        )
+    return requested, None
+
+
+def print_header(start_time, probe, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES):
     mode = "active (HTTP/HTTPS probe)" if probe else "passive (banner read only)"
     print(f"\n{Colors.GREY}Computation Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
-    print(f"{Colors.GREY}Mode: {mode}{Colors.RESET}")
+    print(f"{Colors.GREY}Mode: {mode} | Timeout: {timeout:g}s | Retries: {retries}{Colors.RESET}")
     print("-" * 65)
     print(f"{Colors.BOLD} PORT   | STATUS | SERVICE      | BANNER{Colors.RESET}")
     print("-" * 65)
@@ -479,10 +498,13 @@ def main():
     ip = resolve_target(target)
 
     probe = not args.no_probe
-    scanner = Scanner(target, ip, args.ports, args.threads, args.timeout, probe, args.retries)
+    timeout, warning = resolve_timeout(args.timeout, os.name == "nt")
+    if warning:
+        print(f"{Colors.YELLOW}[!] {warning}{Colors.RESET}")
+    scanner = Scanner(target, ip, args.ports, args.threads, timeout, probe, args.retries)
 
     start_time = datetime.now()
-    print_header(start_time, probe)
+    print_header(start_time, probe, timeout, args.retries)
 
     try:
         scanner.run()

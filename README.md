@@ -52,10 +52,14 @@ python scanner.py 10.0.0.5 --json report.json      # save JSON without asking
 | `target` | IP or hostname | interactive prompt |
 | `-p`, `--ports` | Port range or list | `1-1000` |
 | `-t`, `--threads` | Worker threads | `100` |
-| `--timeout` | Connection timeout (seconds) | `0.5` |
+| `--timeout` | Connection timeout (seconds) | `0.5` (`3.0` on Windows) |
 | `--retries` | Extra attempts for ports that time out | `1` |
 | `--no-probe` | Passive mode: never send HTTP requests | off |
 | `--json FILE` | Save results to FILE as JSON without asking | ask after the scan |
+
+### About port states and Windows
+
+`filtered` means "no answer within the timeout", which usually points to a firewall dropping packets. Windows reports a refused connection (a closed port) only after its own connection retries, which was measured at about 2 seconds even on `127.0.0.1`. For that reason the default timeout is `3.0` seconds on Windows and `0.5` elsewhere. If you pass a lower `--timeout` on Windows, AXIOM honours it but warns that closed ports may then be reported as `filtered`.
 
 ### About the JSON report
 
