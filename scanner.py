@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AXIOM SECURITY SCANNER v2.0
+AXIOM SECURITY SCANNER v2.1
 Author: Plansmight (Kadir Veysel Sayar)
 Description: Mathematical Precision Security Scanner with Enhanced UI.
 
@@ -8,7 +8,9 @@ Use only against systems you own or are explicitly authorized to test.
 """
 
 import argparse
+import json
 import os
+import re
 import socket
 import ssl
 import sys
@@ -16,11 +18,12 @@ import threading
 from datetime import datetime
 from queue import Queue
 
-VERSION = "2.0"
+VERSION = "2.1"
 DEFAULT_TARGET = "scanme.nmap.org"
 DEFAULT_PORTS = "1-1000"
 DEFAULT_THREADS = 100
 DEFAULT_TIMEOUT = 0.5
+DEFAULT_RETRIES = 1
 
 # Ports that get an active HTTP(S) probe instead of a passive banner read.
 HTTP_PORTS = {80, 8000, 8008, 8080, 8081, 8888}
@@ -94,6 +97,16 @@ def positive_int(value):
     return number
 
 
+def non_negative_int(value):
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{value}' is not a number")
+    if number < 0:
+        raise argparse.ArgumentTypeError("value must be 0 or more")
+    return number
+
+
 def positive_float(value):
     try:
         number = float(value)
@@ -134,9 +147,20 @@ def parse_args():
         help=f"connection timeout in seconds (default: {DEFAULT_TIMEOUT})",
     )
     parser.add_argument(
+        "--retries",
+        type=non_negative_int,
+        default=DEFAULT_RETRIES,
+        help=f"extra attempts for ports that time out (default: {DEFAULT_RETRIES}, 0 = fastest)",
+    )
+    parser.add_argument(
         "--no-probe",
         action="store_true",
         help="passive mode: never send HTTP requests, only read banners services announce",
+    )
+    parser.add_argument(
+        "--json",
+        metavar="FILE",
+        help="save results to FILE as JSON without asking (default: ask after the scan)",
     )
     return parser.parse_args()
 
@@ -261,7 +285,7 @@ def http_probe(sock, host, use_tls, timeout=2.0):
 
 
 class Scanner:
-    def __init__(self, target, ip, ports, threads, timeout, probe=True):
+    def __init__(self, target, ip, ports, threads, timeout, probe=True, retries=DEFAULT_RETRIES):
         self.target = target
         self.ip = ip
         self.ports = ports
@@ -269,11 +293,13 @@ class Scanner:
         self.threads = min(threads, self.total)
         self.timeout = timeout
         self.probe = probe
+        self.retries = retries
         self.queue = Queue()
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.scanned = 0
-        self.results = []  # (port, service, banner)
+        self.results = []  # open ports: (port, service, banner)
+        self.counts = {"open": 0, "closed": 0, "filtered": 0}
 
     def identify(self, sock, port):
         if self.probe:
@@ -284,10 +310,25 @@ class Scanner:
         return grab_banner(sock)
 
     def scan_port(self, port):
+        """Classify a port as open, closed (actively refused) or filtered
+        (no answer: usually a firewall dropping packets). Only timeouts are
+        retried, a refusal is a definitive answer."""
+        state = "filtered"
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(self.timeout)
-                if sock.connect_ex((self.ip, port)) == 0:
+            for _ in range(self.retries + 1):
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(self.timeout)
+                    try:
+                        sock.connect((self.ip, port))
+                    except ConnectionRefusedError:
+                        state = "closed"
+                        break
+                    except socket.timeout:
+                        continue  # no answer yet: try again
+                    except OSError:
+                        break  # unreachable / reset: retrying will not help
+
+                    state = "open"
                     banner = self.identify(sock, port)
                     service = service_name(port)
                     with self.lock:
@@ -297,10 +338,12 @@ class Scanner:
                             f"{Colors.GREEN} [+] {port:<6} | {Colors.BOLD}OPEN"
                             f"{Colors.RESET}{Colors.GREEN} | {service:<12} | {banner}{Colors.RESET}"
                         )
+                    break
         except OSError:
-            pass  # unreachable / reset: treat as closed
+            pass  # e.g. could not create a socket: leave the port as filtered
         finally:
             with self.lock:
+                self.counts[state] += 1
                 self.scanned += 1
 
     def worker(self):
@@ -347,6 +390,62 @@ class Scanner:
         monitor.join()
 
 
+# --- JSON CIKTISI ---
+def build_report(scanner, start_time, end_time):
+    return {
+        "tool": "AXIOM",
+        "version": VERSION,
+        "target": scanner.target,
+        "ip": scanner.ip,
+        "mode": "active" if scanner.probe else "passive",
+        "started": start_time.isoformat(timespec="seconds"),
+        "finished": end_time.isoformat(timespec="seconds"),
+        "duration_seconds": round((end_time - start_time).total_seconds(), 3),
+        "ports_scanned": scanner.total,
+        "summary": dict(scanner.counts),
+        "open_ports": [
+            {"port": port, "service": service, "banner": banner}
+            for port, service, banner in sorted(scanner.results)
+        ],
+        "notice": "Banners and Server headers are reported by the remote host and are not verified.",
+    }
+
+
+def default_filename(target, when):
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", target)
+    return f"axiom_{safe}_{when:%Y%m%d_%H%M%S}.json"
+
+
+def unique_path(path):
+    """Never overwrite a file the user did not explicitly point us at."""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    counter = 1
+    while os.path.exists(f"{base}_{counter}{ext}"):
+        counter += 1
+    return f"{base}_{counter}{ext}"
+
+
+def ask_save_json(default_name):
+    """Ask after the scan whether to save a JSON report. Returns a path or None."""
+    try:
+        answer = input(f"{Colors.CYAN}Save results as JSON? [y/N]: {Colors.RESET}").strip().lower()
+        if answer not in ("y", "yes", "e", "evet"):
+            return None
+        name = input(f"{Colors.CYAN}Filename [{default_name}]: {Colors.RESET}").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return None
+    return unique_path(name or default_name)
+
+
+def save_json(report, path):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+
+
 def print_header(start_time, probe):
     mode = "active (HTTP/HTTPS probe)" if probe else "passive (banner read only)"
     print(f"\n{Colors.GREY}Computation Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
@@ -356,16 +455,18 @@ def print_header(start_time, probe):
     print("-" * 65)
 
 
-def print_summary(results, duration):
+def print_summary(scanner, duration):
     sys.stdout.write("\r" + " " * 80 + "\r")
     print("-" * 65)
     print(f"{Colors.CYAN}AXIOM ANALYSIS COMPLETE{Colors.RESET}")
-    if results:
+    if scanner.results:
         print(f"{Colors.BOLD}Open ports (sorted):{Colors.RESET}")
-        for port, service, banner in sorted(results):
+        for port, service, banner in sorted(scanner.results):
             print(f"  {Colors.GREEN}{port:<6}{Colors.RESET} {service:<12} {banner}")
         print(f"{Colors.GREY}Banners and Server headers are reported by the remote host, not verified.{Colors.RESET}")
-    print(f"Total Open Ports : {Colors.GREEN}{len(results)}{Colors.RESET}")
+    counts = scanner.counts
+    print(f"Total Open Ports : {Colors.GREEN}{counts['open']}{Colors.RESET}")
+    print(f"Port States      : open {counts['open']} | closed {counts['closed']} | filtered {counts['filtered']}")
     print(f"Time Elapsed     : {duration}")
     print("-" * 65 + "\n")
 
@@ -378,7 +479,7 @@ def main():
     ip = resolve_target(target)
 
     probe = not args.no_probe
-    scanner = Scanner(target, ip, args.ports, args.threads, args.timeout, probe)
+    scanner = Scanner(target, ip, args.ports, args.threads, args.timeout, probe, args.retries)
 
     start_time = datetime.now()
     print_header(start_time, probe)
@@ -390,7 +491,24 @@ def main():
         print(f"\n\n{Colors.RED}[!] Process Interrupted.{Colors.RESET}")
         sys.exit(130)
 
-    print_summary(scanner.results, datetime.now() - start_time)
+    end_time = datetime.now()
+    print_summary(scanner, end_time - start_time)
+
+    # JSON output is opt-in: --json FILE saves directly, otherwise ask at the end,
+    # but only when a person is at the keyboard (never hang a script or a pipe).
+    path = None
+    if args.json:
+        path = args.json
+    elif sys.stdin.isatty():
+        path = ask_save_json(default_filename(target, start_time))
+
+    if path:
+        try:
+            save_json(build_report(scanner, start_time, end_time), path)
+        except OSError as exc:
+            print(f"{Colors.RED}[!] Could not save JSON: {exc}{Colors.RESET}")
+            sys.exit(1)
+        print(f"{Colors.GREEN}[+] Results saved to {os.path.abspath(path)}{Colors.RESET}")
 
 
 if __name__ == "__main__":

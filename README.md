@@ -17,7 +17,10 @@ AXIOM is a multi-threaded TCP port scanner written in Python, designed for learn
 * **Safe Output:** Everything a remote host sends back is sanitized before printing, so a hostile banner cannot inject terminal escape sequences.
 * **Service Names:** Maps open ports to their standard service name (a hint based on the port number, not a detection).
 * **Precision UI:** Visual progress bar and color-coded output.
-* **Sorted Report:** Open ports listed in port order with scan duration.
+* **Port States:** Tells apart `open`, `closed` (actively refused) and `filtered` (no answer, usually a firewall) instead of lumping everything that is not open together.
+* **Retries:** Ports that time out are retried (`--retries`, default 1) so slow hosts do not hide open ports. Refused connections are final and never retried.
+* **Sorted Report:** Open ports listed in port order with scan duration and a count per port state.
+* **JSON Export:** After a scan AXIOM asks whether to save the results as JSON, or use `--json FILE` to save without asking.
 * **Interactive or CLI Mode:** Pass the target as an argument, or run without one for the interactive prompt.
 
 ## 📸 Screenshots
@@ -40,6 +43,8 @@ python scanner.py 192.168.1.10 -p 1-65535          # full port range
 python scanner.py example.local -p 22,80,443       # specific ports
 python scanner.py 10.0.0.5 -t 200 --timeout 1.0    # 200 threads, 1s timeout
 python scanner.py 10.0.0.5 --no-probe              # passive mode, no HTTP requests
+python scanner.py 10.0.0.5 --retries 0             # fastest: no retry on timeouts
+python scanner.py 10.0.0.5 --json report.json      # save JSON without asking
 ```
 
 | Option | Description | Default |
@@ -48,7 +53,15 @@ python scanner.py 10.0.0.5 --no-probe              # passive mode, no HTTP reque
 | `-p`, `--ports` | Port range or list | `1-1000` |
 | `-t`, `--threads` | Worker threads | `100` |
 | `--timeout` | Connection timeout (seconds) | `0.5` |
+| `--retries` | Extra attempts for ports that time out | `1` |
 | `--no-probe` | Passive mode: never send HTTP requests | off |
+| `--json FILE` | Save results to FILE as JSON without asking | ask after the scan |
+
+### About the JSON report
+
+When a person is at the keyboard, AXIOM asks `Save results as JSON? [y/N]` after the scan (default: no) and proposes a file name like `axiom_<target>_<date>_<time>.json`. If the file already exists, a numbered name is used so nothing is overwritten. When the input is piped or the tool runs from a script, it never prompts; use `--json FILE` there.
+
+The report contains the target, IP, mode, timings, a port state summary and the open ports with their service and banner. Reports hold details about the scanned host, so `axiom_*.json` is in `.gitignore`.
 
 ### About the probe
 
@@ -59,7 +72,9 @@ The `Server` header and all banners are **reported by the remote host and not ve
 ## 🗺️ Roadmap
 
 - [x] HTTP/HTTPS probing for web server and TLS version detection
-- [ ] JSON / CSV report export
+- [x] open / closed / filtered port states with retries
+- [x] JSON report export
+- [ ] CSV export, CIDR ranges and IPv6
 - [ ] Vulnerability hints for detected service versions
 - [ ] Unit tests and CI
 

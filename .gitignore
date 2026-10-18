@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# Scan reports contain target IPs and service details: keep them out of the repo
+axiom_*.json
